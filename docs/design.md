@@ -1,3 +1,5 @@
+Terminal Usage --
+
 git init
 git add .
 git config --global user.email {Email}
