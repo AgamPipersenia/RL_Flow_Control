@@ -24,6 +24,11 @@ VISUALIZE = True
 PLOT_EVERY_N_STEPS = 100
 SKIP_FIRST_N_ITERATIONS = 5000
 
+# Jet parameters
+JET_THETA = jnp.pi / 2  # Jet at 90° (top of cylinder)
+JET_WIDTH = 3           # Width of jet in grid points
+JET_X = CYLINDER_CENTER_INDEX_X + CYLINDER_RADIUS_INDICES * jnp.cos(JET_THETA)
+JET_Y = CYLINDER_CENTER_INDEX_Y + CYLINDER_RADIUS_INDICES * jnp.sin(JET_THETA)
 
 r"""
 LBM Grid: D2Q9
@@ -158,8 +163,17 @@ def main():
     velocity_profile = jnp.zeros((N_POINTS_X, N_POINTS_Y, 2))
     velocity_profile = velocity_profile.at[:, :, 0].set(MAX_HORIZONTAL_INFLOW_VELOCITY)
 
+    # Compute jet_mask statically
+    jet_mask = (
+        (jnp.abs(X - JET_X) < JET_WIDTH / 2) &
+        (jnp.abs(Y - JET_Y) < JET_WIDTH / 2) &
+        (jnp.sqrt((X - CYLINDER_CENTER_INDEX_X)**2 + (Y - CYLINDER_CENTER_INDEX_Y)**2) <= CYLINDER_RADIUS_INDICES)
+    )
+    print(jnp.sum(jet_mask))
+    
+
     @jax.jit
-    def update(discrete_velocities_prev):
+    def update(discrete_velocities_prev, jet_strength):
         # (1) Prescribe the outflow BC on the right boundary
         discrete_velocities_prev = discrete_velocities_prev.at[-1, :, LEFT_VELOCITIES].set(
             discrete_velocities_prev[-2, :, LEFT_VELOCITIES]
@@ -168,59 +182,55 @@ def main():
         # (2) Macroscopic Velocities
         density_prev = get_density(discrete_velocities_prev)
         macroscopic_velocities_prev = get_macroscopic_velocities(
-            discrete_velocities_prev,
-            density_prev,
+            discrete_velocities_prev, density_prev
         )
 
         # (3) Prescribe Inflow Dirichlet BC using Zou/He scheme
-        macroscopic_velocities_prev =\
-            macroscopic_velocities_prev.at[0, 1:-1, :].set(
-                velocity_profile[0, 1:-1, :]
-            )
+        macroscopic_velocities_prev = macroscopic_velocities_prev.at[0, 1:-1, :].set(
+            velocity_profile[0, 1:-1, :]
+        )
         density_prev = density_prev.at[0, :].set(
             (
                 get_density(discrete_velocities_prev[0, :, PURE_VERTICAL_VELOCITIES].T)
-                +
-                2 *
-                get_density(discrete_velocities_prev[0, :, LEFT_VELOCITIES].T)
-            ) / (
-                1 - macroscopic_velocities_prev[0, :, 0]
-            )
+                + 2 * get_density(discrete_velocities_prev[0, :, LEFT_VELOCITIES].T)
+            ) / (1 - macroscopic_velocities_prev[0, :, 0])
         )
 
         # (4) Compute discrete Equilibria velocities
         equilibrium_discrete_velocities = get_equilibrium_discrete_velocities(
-            macroscopic_velocities_prev,
-            density_prev,
+            macroscopic_velocities_prev, density_prev
         )
 
         # (3) Belongs to the Zou/He scheme
-        discrete_velocities_prev = \
-            discrete_velocities_prev.at[0, :, RIGHT_VELOCITIES].set(
-                equilibrium_discrete_velocities[0, :, RIGHT_VELOCITIES]
-            )
-        
+        discrete_velocities_prev = discrete_velocities_prev.at[0, :, RIGHT_VELOCITIES].set(
+            equilibrium_discrete_velocities[0, :, RIGHT_VELOCITIES]
+        )
+
         # (5) Collide according to BGK
         discrete_velocities_post_collision = (
             discrete_velocities_prev
-            -
-            relaxation_omega
-            *
-            (
-                discrete_velocities_prev
-                -
-                equilibrium_discrete_velocities
-            )
+            - relaxation_omega
+            * (discrete_velocities_prev - equilibrium_discrete_velocities)
         )
 
-        # (6) Bounce-Back Boundary Conditions to enfore the no-slip
+        # (6) Apply jet effect using jnp.where
+        jet_effect = jet_strength * LATTICE_WEIGHTS
+        for vel in UP_VELOCITIES:
+            discrete_velocities_post_collision = discrete_velocities_post_collision.at[:, :, vel].set(
+                jnp.where(jet_mask, discrete_velocities_post_collision[:, :, vel] + jet_effect[vel], discrete_velocities_post_collision[:, :, vel])
+            )
+        for vel in DOWN_VELOCITIES:
+            discrete_velocities_post_collision = discrete_velocities_post_collision.at[:, :, vel].set(
+                jnp.where(jet_mask, discrete_velocities_post_collision[:, :, vel] - jet_effect[vel], discrete_velocities_post_collision[:, :, vel])
+            )
+
+        # (7) Bounce-Back Boundary Conditions for no-slip
         for i in range(N_DISCRETE_VELOCITIES):
-            discrete_velocities_post_collision =\
-                discrete_velocities_post_collision.at[obstacle_mask, LATTICE_INDICES[i]].set(
-                    discrete_velocities_prev[obstacle_mask, OPPOSITE_LATTICE_INDICES[i]]
-                )
-        
-        # (7) Stream alongside lattice velocities
+            discrete_velocities_post_collision = discrete_velocities_post_collision.at[obstacle_mask, LATTICE_INDICES[i]].set(
+                discrete_velocities_prev[obstacle_mask, OPPOSITE_LATTICE_INDICES[i]]
+            )
+
+        # (8) Stream alongside lattice velocities
         discrete_velocities_streamed = discrete_velocities_post_collision
         for i in range(N_DISCRETE_VELOCITIES):
             discrete_velocities_streamed = discrete_velocities_streamed.at[:, :, i].set(
@@ -234,7 +244,7 @@ def main():
                     axis=1,
                 )
             )
-        
+
         return discrete_velocities_streamed
 
 
@@ -247,8 +257,8 @@ def main():
     plt.figure(figsize=(15, 6), dpi=100)
 
     for iteration_index in tqdm(range(N_ITERATIONS)):
-        discrete_velocities_next = update(discrete_velocities_prev)
-
+        discrete_velocities_next = update(discrete_velocities_prev, jet_strength=0.1)
+        # print(jnp.any(jnp.isnan(discrete_velocities_next)))
         discrete_velocities_prev = discrete_velocities_next
 
         if iteration_index % PLOT_EVERY_N_STEPS == 0 and VISUALIZE and iteration_index > SKIP_FIRST_N_ITERATIONS:
