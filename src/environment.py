@@ -5,7 +5,7 @@ import gym
 from gym import spaces
 
 import lbm_simulation as lbm
-from config import config
+import config
 
 class FlowControlEnv(gym.Env):
     """
@@ -159,9 +159,9 @@ class FlowControlEnv(gym.Env):
         # Extract features around and behind the cylinder
         # 1. Velocity probes behind the cylinder
         x_probes = [
-            self.cylinder_x + self.cylinder_radius * 1.5,
-            self.cylinder_x + self.cylinder_radius * 3,
-            self.cylinder_x + self.cylinder_radius * 5
+            int(self.cylinder_x + self.cylinder_radius * 1.5),
+            int(self.cylinder_x + self.cylinder_radius * 3),
+            int(self.cylinder_x + self.cylinder_radius * 5)
         ]
         
         y_probes = np.linspace(
@@ -174,29 +174,40 @@ class FlowControlEnv(gym.Env):
         features = []
         for x in x_probes:
             for y in y_probes:
-                features.append(velocities[x, y, 0])  # u
-                features.append(velocities[x, y, 1])  # v
-                features.append(curl[x, y])           # vorticity
+                # Ensure indices are within bounds
+                if 0 <= x < self.npointsx and 0 <= y < self.npointsy:
+                    features.append(float(velocities[x, y, 0]))  # u
+                    features.append(float(velocities[x, y, 1]))  # v
+                    features.append(float(curl[x, y]))           # vorticity
+                else:
+                    # Add default values if out of bounds
+                    features.append(0.0)
+                    features.append(0.0)
+                    features.append(0.0)
         
         # 2. Pressure (density) around the cylinder
         angles = np.linspace(0, 2*np.pi, 8, endpoint=False)
         for angle in angles:
             x = int(self.cylinder_x + (self.cylinder_radius + 1) * np.cos(angle))
             y = int(self.cylinder_y + (self.cylinder_radius + 1) * np.sin(angle))
-            features.append(density[x, y])
+            # Ensure indices are within bounds
+            if 0 <= x < self.npointsx and 0 <= y < self.npointsy:
+                features.append(float(density[x, y]))
+            else:
+                features.append(1.0)  # Default density value
         
         # 3. Global flow metrics
         drag_coef, lift_coef = lbm.calculate_forces(self.discrete_velocities)
-        features.append(drag_coef)
-        features.append(lift_coef)
+        features.append(float(drag_coef))
+        features.append(float(lift_coef))
         
         # 4. Recent history of drag and lift (if available)
         if len(self.drag_history) > 0:
-            features.append(np.mean(self.drag_history[-5:]))
-            features.append(np.mean(self.lift_history[-5:]))
+            features.append(float(np.mean(self.drag_history[-5:])))
+            features.append(float(np.mean(self.lift_history[-5:])))
         else:
-            features.append(drag_coef)
-            features.append(lift_coef)
+            features.append(float(drag_coef))
+            features.append(float(lift_coef))
         
         # Convert to numpy array and ensure correct length
         features = np.array(features, dtype=np.float32)

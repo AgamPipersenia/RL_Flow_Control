@@ -8,8 +8,8 @@ from tqdm import tqdm
 
 from environment import FlowControlEnv
 from model.agent import DDPGAgent
-from src.utils.visualization import save_comparison_video, plot_comparison_results
-from src.utils.metrics import calculate_strouhal_number
+from utils.visualization import save_comparison_video, plot_comparison_results
+from utils.metrics import calculate_strouhal_number
 import config
 
 def test_agent(model_path, num_episodes=5, render=True, save_results=True):

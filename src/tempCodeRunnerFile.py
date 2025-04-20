@@ -10,7 +10,7 @@ from environment import FlowControlEnv
 from model.agent import DDPGAgent
 from utils.visualization import plot_training_progress, save_training_video
 from utils.metrics import calculate_strouhal_number
-import config
+from config import config
 
 def train():
     """Train the RL agent for active flow control."""

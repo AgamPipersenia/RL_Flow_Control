@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from model.networks import ActorNetwork, CriticNetwork
 from model.replay_buffer import ReplayBuffer
-from config import config
+import config
 
 class DDPGAgent:
     """
