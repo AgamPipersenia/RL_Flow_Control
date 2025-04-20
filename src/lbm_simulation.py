@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import cmasher as cmr
+import numpy as np
 from tqdm import tqdm
 
 # Existing constants (unchanged)
@@ -33,7 +34,34 @@ DOWN_VELOCITIES = jnp.array([4, 7, 8])
 PURE_VERTICAL_VELOCITIES = jnp.array([0, 2, 4])
 PURE_HORIZONTAL_VELOCITIES = jnp.array([0, 1, 3])
 
-# Existing functions (unchanged)
+# Global variables for update
+kinematic_viscosity = (
+    (MAX_HORIZONTAL_INFLOW_VELOCITY * CYLINDER_RADIUS_INDICES) / REYNOLDS_NUMBER
+)
+relaxation_omega = 1.0 / (3.0 * kinematic_viscosity + 0.5)
+X = jnp.arange(N_POINTS_X)
+Y = jnp.arange(N_POINTS_Y)
+X, Y = jnp.meshgrid(X, Y, indexing="ij")
+obstacle_mask = (
+    jnp.sqrt(
+        (X - CYLINDER_CENTER_INDEX_X)**2 +
+        (Y - CYLINDER_CENTER_INDEX_Y)**2
+    ) < CYLINDER_RADIUS_INDICES
+)
+velocity_profile = jnp.zeros((N_POINTS_X, N_POINTS_Y, 2))
+velocity_profile = velocity_profile.at[:, :, 0].set(MAX_HORIZONTAL_INFLOW_VELOCITY)
+
+# Jet configuration
+JET_THETA = jnp.pi / 2
+JET_WIDTH = 3
+JET_X = CYLINDER_CENTER_INDEX_X + CYLINDER_RADIUS_INDICES * jnp.cos(JET_THETA)
+JET_Y = CYLINDER_CENTER_INDEX_Y + CYLINDER_RADIUS_INDICES * jnp.sin(JET_THETA)
+jet_mask = (
+    (jnp.abs(X - JET_X) < JET_WIDTH / 2) &
+    (jnp.abs(Y - JET_Y) < JET_WIDTH / 2) &
+    (jnp.sqrt((X - CYLINDER_CENTER_INDEX_X)**2 + (Y - CYLINDER_CENTER_INDEX_Y)**2) <= CYLINDER_RADIUS_INDICES)
+)
+
 def get_density(discrete_velocities):
     density = jnp.sum(discrete_velocities, axis=-1)
     return density
@@ -67,33 +95,64 @@ def get_equilibrium_discrete_velocities(macroscopic_velocities, density):
     )
     return equilibrium_discrete_velocities
 
-# Global variables for update
-kinematic_viscosity = (
-    (MAX_HORIZONTAL_INFLOW_VELOCITY * CYLINDER_RADIUS_INDICES) / REYNOLDS_NUMBER
-)
-relaxation_omega = 1.0 / (3.0 * kinematic_viscosity + 0.5)
-X = jnp.arange(N_POINTS_X)
-Y = jnp.arange(N_POINTS_Y)
-X, Y = jnp.meshgrid(X, Y, indexing="ij")
-obstacle_mask = (
-    jnp.sqrt(
-        (X - CYLINDER_CENTER_INDEX_X)**2 +
-        (Y - CYLINDER_CENTER_INDEX_Y)**2
-    ) < CYLINDER_RADIUS_INDICES
-)
-velocity_profile = jnp.zeros((N_POINTS_X, N_POINTS_Y, 2))
-velocity_profile = velocity_profile.at[:, :, 0].set(MAX_HORIZONTAL_INFLOW_VELOCITY)
-JET_THETA = jnp.pi / 2
-JET_WIDTH = 3
-JET_X = CYLINDER_CENTER_INDEX_X + CYLINDER_RADIUS_INDICES * jnp.cos(JET_THETA)
-JET_Y = CYLINDER_CENTER_INDEX_Y + CYLINDER_RADIUS_INDICES * jnp.sin(JET_THETA)
-jet_mask = (
-    (jnp.abs(X - JET_X) < JET_WIDTH / 2) &
-    (jnp.abs(Y - JET_Y) < JET_WIDTH / 2) &
-    (jnp.sqrt((X - CYLINDER_CENTER_INDEX_X)**2 + (Y - CYLINDER_CENTER_INDEX_Y)**2) <= CYLINDER_RADIUS_INDICES)
-)
+def calculate_forces(discrete_velocities):
+    """Calculate drag and lift forces on the cylinder."""
+    density = get_density(discrete_velocities)
+    velocities = get_macroscopic_velocities(discrete_velocities, density)
+    
+    # Get points around the cylinder (one grid point away from surface)
+    cylinder_boundary = jnp.zeros_like(obstacle_mask)
+    for i in range(N_POINTS_X):
+        for j in range(N_POINTS_Y):
+            dist = jnp.sqrt((i - CYLINDER_CENTER_INDEX_X)**2 + (j - CYLINDER_CENTER_INDEX_Y)**2)
+            cylinder_boundary = cylinder_boundary.at[i, j].set(
+                (dist >= CYLINDER_RADIUS_INDICES) & 
+                (dist <= CYLINDER_RADIUS_INDICES + 1)
+            )
+    
+    # Calculate pressure around cylinder
+    pressure = density / 3.0  # p = rho * cs^2, where cs^2 = 1/3 in lattice units
+    
+    # Calculate normal vectors at boundary points
+    normals = jnp.zeros((N_POINTS_X, N_POINTS_Y, 2))
+    for i in range(N_POINTS_X):
+        for j in range(N_POINTS_Y):
+            if cylinder_boundary[i, j]:
+                nx = (i - CYLINDER_CENTER_INDEX_X) / jnp.sqrt((i - CYLINDER_CENTER_INDEX_X)**2 + (j - CYLINDER_CENTER_INDEX_Y)**2)
+                ny = (j - CYLINDER_CENTER_INDEX_Y) / jnp.sqrt((i - CYLINDER_CENTER_INDEX_X)**2 + (j - CYLINDER_CENTER_INDEX_Y)**2)
+                normals = normals.at[i, j, 0].set(nx)
+                normals = normals.at[i, j, 1].set(ny)
+    
+    # Calculate forces (simplified model)
+    drag = jnp.sum(pressure[cylinder_boundary] * normals[cylinder_boundary, 0])
+    lift = jnp.sum(pressure[cylinder_boundary] * normals[cylinder_boundary, 1])
+    
+    # Calculate coefficients
+    drag_coef = drag / (0.5 * MAX_HORIZONTAL_INFLOW_VELOCITY**2 * 2 * CYLINDER_RADIUS_INDICES)
+    lift_coef = lift / (0.5 * MAX_HORIZONTAL_INFLOW_VELOCITY**2 * 2 * CYLINDER_RADIUS_INDICES)
+    
+    return drag_coef, lift_coef
 
-# Move update function to module level
+def calculate_vorticity(velocities):
+    """Calculate vorticity field from velocity field."""
+    d_u__d_x, d_u__d_y = jnp.gradient(velocities[..., 0])
+    d_v__d_x, d_v__d_y = jnp.gradient(velocities[..., 1])
+    curl = (d_u__d_y - d_v__d_x)
+    return curl
+
+def get_wake_metric(velocities):
+    """Calculate a metric for wake oscillation/stability."""
+    # Extract a line of points behind the cylinder
+    x_probe = CYLINDER_CENTER_INDEX_X + 2 * CYLINDER_RADIUS_INDICES
+    y_range = jnp.arange(CYLINDER_CENTER_INDEX_Y - CYLINDER_RADIUS_INDICES, 
+                         CYLINDER_CENTER_INDEX_Y + CYLINDER_RADIUS_INDICES + 1)
+    
+    # Calculate velocity fluctuation in the wake
+    v_fluctuation = jnp.std(velocities[x_probe, y_range, 1])
+    
+    # Higher fluctuation means more unstable wake (negative reward)
+    return -v_fluctuation
+
 @jax.jit
 def update(discrete_velocities_prev, jet_strength):
     # (1) Prescribe the outflow BC on the right boundary
@@ -169,12 +228,72 @@ def update(discrete_velocities_prev, jet_strength):
 
     return discrete_velocities_streamed
 
+def initialize_flow():
+    """Initialize the flow field."""
+    return get_equilibrium_discrete_velocities(
+        velocity_profile, jnp.ones((N_POINTS_X, N_POINTS_Y))
+    )
+
+def visualize_flow(discrete_velocities, jet_strength=None, action=None, reward=None, info=None):
+    """Visualize the flow field."""
+    density = get_density(discrete_velocities)
+    macroscopic_velocities = get_macroscopic_velocities(
+        discrete_velocities, density
+    )
+    velocity_magnitude = jnp.linalg.norm(
+        macroscopic_velocities, axis=-1, ord=2
+    )
+    curl = calculate_vorticity(macroscopic_velocities)
+
+    plt.figure(figsize=(15, 10))
+    
+    # Plot velocity magnitude
+    plt.subplot(2, 2, 1)
+    plt.contourf(X, Y, velocity_magnitude, levels=50, cmap=cmr.amber)
+    plt.colorbar().set_label("Velocity Magnitude")
+    plt.gca().add_patch(plt.Circle(
+        (CYLINDER_CENTER_INDEX_X, CYLINDER_CENTER_INDEX_Y),
+        CYLINDER_RADIUS_INDICES, color="darkgreen"
+    ))
+    plt.title("Velocity Magnitude")
+
+    # Plot vorticity
+    plt.subplot(2, 2, 2)
+    plt.contourf(X, Y, curl, levels=50, cmap=cmr.redshift, vmin=-0.02, vmax=0.02)
+    plt.colorbar().set_label("Vorticity")
+    plt.gca().add_patch(plt.Circle(
+        (CYLINDER_CENTER_INDEX_X, CYLINDER_CENTER_INDEX_Y),
+        CYLINDER_RADIUS_INDICES, color="darkgreen"
+    ))
+    plt.title("Vorticity")
+    
+    # Plot jet strength if provided
+    if jet_strength is not None or action is not None:
+        plt.subplot(2, 2, 3)
+        strength = jet_strength if jet_strength is not None else action
+        plt.bar(['Jet Strength'], [strength])
+        plt.ylim(-1.1, 1.1)
+        plt.title(f'Jet Strength: {strength:.3f}')
+    
+    # Plot reward and info if provided
+    if reward is not None:
+        plt.subplot(2, 2, 4)
+        info_text = f'Reward: {reward:.3f}\n'
+        if info is not None:
+            for key, value in info.items():
+                info_text += f'{key}: {value:.3f}\n'
+        plt.text(0.5, 0.5, info_text, horizontalalignment='center', 
+                 verticalalignment='center', fontsize=12, transform=plt.gca().transAxes)
+        plt.axis('off')
+        plt.title('Performance Metrics')
+    
+    plt.tight_layout()
+    return plt.gcf()
+
 def main():
     jax.config.update("jax_enable_x64", True)
 
-    discrete_velocities_prev = get_equilibrium_discrete_velocities(
-        velocity_profile, jnp.ones((N_POINTS_X, N_POINTS_Y))
-    )
+    discrete_velocities_prev = initialize_flow()
 
     plt.style.use("dark_background")
     plt.figure(figsize=(15, 6), dpi=100)
@@ -191,9 +310,7 @@ def main():
             velocity_magnitude = jnp.linalg.norm(
                 macroscopic_velocities, axis=-1, ord=2
             )
-            d_u__d_x, d_u__d_y = jnp.gradient(macroscopic_velocities[..., 0])
-            d_v__d_x, d_v__d_y = jnp.gradient(macroscopic_velocities[..., 1])
-            curl = (d_u__d_y - d_v__d_x)
+            curl = calculate_vorticity(macroscopic_velocities)
 
             plt.subplot(211)
             plt.contourf(X, Y, velocity_magnitude, levels=50, cmap=cmr.amber)
